@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Dict, Any, List
 import rasterio
 import numpy as np
+from rasterio.warp import transform_bounds
+from shapely.geometry import box, shape
+from rasterio.mask import mask
+import geopandas as gpd
+import json
+from osgeo import gdal, ogr, osr
 
 # Add project root to Python path
 current_file = Path(__file__).resolve()
@@ -23,6 +29,7 @@ if project_root is None:
 sys.path.append(str(project_root))
 
 from src.auxiliary.unzip_utils import unzip_sentinel_data
+from src.auxiliary.read_geojson import read_geojson
 
 def setup_logging() -> None:
     """Configure logging to results/logs/preprocessing.log"""
@@ -162,14 +169,151 @@ class PreprocessingPipeline:
             logging.error(f"Error processing {safe_path}: {str(e)}", exc_info=True)
             return False
 
+    def validate_overlap(self, geotiff_path: Path, geojson_path: Path) -> bool:
+        """
+        Validate that the GeoJSON AOI overlaps with the GeoTIFF extent
+        
+        Args:
+            geotiff_path: Path to the GeoTIFF file
+            geojson_path: Path to the GeoJSON file
+        
+        Returns:
+            bool: True if there is overlap, False otherwise
+        """
+        try:
+            # Read GeoJSON
+            geojson_data = read_geojson(geojson_path)
+            if not geojson_data:
+                logging.error("Failed to read GeoJSON file")
+                return False
+                
+            # Get GeoJSON geometry
+            feature = geojson_data["features"][0]
+            aoi_geometry = shape(feature["geometry"])
+            
+            # Read GeoTIFF bounds
+            with rasterio.open(geotiff_path) as src:
+                # Get bounds in the same CRS as GeoJSON (assuming EPSG:4326)
+                bounds = transform_bounds(src.crs, 'EPSG:4326', *src.bounds)
+                raster_bbox = box(*bounds)
+                
+            # Check for intersection
+            if aoi_geometry.intersects(raster_bbox):
+                overlap_area = aoi_geometry.intersection(raster_bbox).area
+                total_area = aoi_geometry.area
+                coverage = (overlap_area / total_area) * 100
+                
+                logging.info(f"AOI coverage: {coverage:.2f}%")
+                return True
+            else:
+                logging.error("No overlap between GeoJSON and GeoTIFF")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error validating overlap: {str(e)}", exc_info=True)
+            return False
+
+    def clip_to_aoi(self, geotiff_path: Path, geojson_path: Path) -> bool:
+        """Clip GeoTIFF to AOI boundary using GDAL"""
+        try:
+            logging.info(f"Clipping {geotiff_path.name} to AOI")
+            
+            # Read GeoJSON and get bounds
+            with open(geojson_path) as f:
+                geojson = json.load(f)
+            
+            # Get bounding box from first feature
+            feature = geojson["features"][0]
+            geom = feature["geometry"]
+            geom_ogr = ogr.CreateGeometryFromJson(json.dumps(geom))
+            min_x, max_x, min_y, max_y = geom_ogr.GetEnvelope()
+            
+            # Open source dataset
+            src_ds = gdal.Open(str(geotiff_path))
+            if src_ds is None:
+                logging.error(f"Could not open {geotiff_path}")
+                return False
+                
+            # Get image dimensions and georeference
+            cols = src_ds.RasterXSize
+            rows = src_ds.RasterYSize
+            bands = src_ds.RasterCount
+            transform = src_ds.GetGeoTransform()
+            
+            # Calculate pixel coordinates
+            x_origin = transform[0]
+            y_origin = transform[3]
+            pixel_width = transform[1]
+            pixel_height = -transform[5]
+            
+            # Compute crop coordinates
+            i1 = max(0, int((min_x - x_origin) / pixel_width))
+            j1 = max(0, int((y_origin - max_y) / pixel_height))
+            i2 = min(cols, int((max_x - x_origin) / pixel_width))
+            j2 = min(rows, int((y_origin - min_y) / pixel_height))
+            
+            new_cols = i2 - i1 + 1
+            new_rows = j2 - j1 + 1
+            
+            # Read bands
+            band_list = []
+            for i in range(bands):
+                band = src_ds.GetRasterBand(i + 1)
+                data = band.ReadAsArray(i1, j1, new_cols, new_rows)
+                band_list.append(data)
+            
+            # Update geotransform for new extent
+            new_x = x_origin + i1 * pixel_width
+            new_y = y_origin - j1 * pixel_height
+            new_transform = (new_x, transform[1], transform[2], 
+                            new_y, transform[4], transform[5])
+            
+            # Create output dataset
+            clip_path = geotiff_path.parent / f"{geotiff_path.stem}_clipped.tif"
+            driver = gdal.GetDriverByName("GTiff")
+            dst_ds = driver.Create(str(clip_path), new_cols, new_rows, 
+                                 bands, gdal.GDT_Float32,
+                                 options=['COMPRESS=LZW'])
+            
+            if dst_ds is None:
+                logging.error("Could not create output file")
+                return False
+            
+            # Write bands
+            for i, data in enumerate(band_list):
+                dst_band = dst_ds.GetRasterBand(i + 1)
+                dst_band.WriteArray(data)
+                # Copy band description
+                src_band = src_ds.GetRasterBand(i + 1)
+                dst_band.SetDescription(src_band.GetDescription())
+            
+            # Set spatial reference
+            dst_ds.SetGeoTransform(new_transform)
+            dst_ds.SetProjection(src_ds.GetProjection())
+            
+            # Clean up
+            src_ds = None
+            dst_ds = None
+            
+            # Remove original file
+            geotiff_path.unlink()
+            logging.info(f"Saved clipped raster to: {clip_path}")
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error clipping to AOI: {str(e)}", exc_info=True)
+            return False
+
     def run(self) -> bool:
         """Run the preprocessing pipeline"""
         try:
             logging.info("Starting preprocessing pipeline...")
             
-            # Setup paths - only using raw directory now
+            # Setup paths
             raw_dir = self.root_dir / "data" / "raw" / "Sentinel-2"
             output_dir = self.root_dir / "data" / "preprocessed" / "Sentinel-2" / "L2A"
+            geojson_path = self.root_dir / "data" / "external" / "municipio_1_Rome.geojson"
             
             # Create necessary directories
             raw_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +333,24 @@ class PreprocessingPipeline:
                 if not self.process_safe_directory(safe_path, output_dir, bands_to_process):
                     logging.error(f"Failed to process {safe_path.name}")
                     continue
+
+            # Step 4: Validate overlap and clip
+            logging.info("\nStep 4: Validating overlap with AOI and clipping...")
+            
+            for geotiff_path in output_dir.glob("*_bands.tif"):
+                logging.info(f"Processing: {geotiff_path.name}")
+                
+                # Check overlap
+                if self.validate_overlap(geotiff_path, geojson_path):
+                    # Clip to AOI if overlapping
+                    if not self.clip_to_aoi(geotiff_path, geojson_path):
+                        logging.error(f"Failed to clip {geotiff_path.name}")
+                        continue
+                else:
+                    logging.warning(f"Skipping {geotiff_path.name} - No overlap with AOI")
+                    # Optionally remove non-overlapping files
+                    geotiff_path.unlink()
+                    logging.info(f"Removed non-overlapping raster: {geotiff_path}")
 
             logging.info("\nPreprocessing pipeline completed")
             return True

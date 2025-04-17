@@ -20,3 +20,7 @@ temp/
 # IDE
 .vscode/
 *.code-workspace
+
+# Git credentials
+.git-credentials
+.gitconfig
