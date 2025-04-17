@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+*.egg-info/
+
+# Project specific
+data/
+results/
+logs/
+*.log
+*.tif
+*.jp2
+*.zip
+*.SAFE/
+temp/
+
+# IDE
+.vscode/
+*.code-workspace

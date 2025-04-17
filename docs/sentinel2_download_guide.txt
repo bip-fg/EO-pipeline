@@ -1,0 +1,189 @@
+SENTINEL-2 DOWNLOAD IMPLEMENTATION GUIDE
+======================================
+
+1. Required Dependencies
+----------------------
+Install these packages in your virtual environment:
+```
+pip install boto3 pandas requests sentinelsat
+```
+
+2. Configuration File (config.yaml)
+---------------------------------
+```yaml
+download:
+  provider: "aws"
+  aws:
+    region: "eu-central-1"
+    bucket: "sentinel-s2-l2a"
+    cloud_cover_threshold: 30
+    tile_name: "33TTG"  # UTM tile for Rome area
+
+satellite:
+  copernicus:
+    platform: "Sentinel-2"
+    product_level: "L2A"
+
+processing:
+  output_folder: "data/processed"
+  intermediate_folder: "data/intermediate"
+  algorithm: "ndvi"
+
+logging:
+  log_file: "results/logs/pipeline.log"
+  log_level: "DEBUG"
+```
+
+3. Download Script (download.py)
+------------------------------
+```python
+import os
+import yaml
+import logging
+import boto3
+import botocore
+import pandas as pd
+from datetime import datetime
+
+class AWSS2Downloader:
+    def __init__(self, region, bucket):
+        # Configure for anonymous access
+        config = botocore.config.Config(
+            signature_version=botocore.UNSIGNED,
+            retries={'max_attempts': 3}
+        )
+        self.s3 = boto3.client(
+            's3',
+            region_name=region,
+            config=config
+        )
+        self.bucket = bucket
+        
+    def search_products(self, tile_name, start_date, end_date, cloud_cover):
+        logging.info(f"Searching for products in tile {tile_name}")
+        
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        products = []
+        
+        for date in pd.date_range(start_dt, end_dt):
+            prefix = f"tiles/{tile_name[:2]}/{tile_name[2]}/{tile_name[3:]}/{date.strftime('%Y/%m/%d')}"
+            try:
+                objects = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=prefix)
+                if 'Contents' in objects:
+                    for obj in objects['Contents']:
+                        if obj['Key'].endswith('metadata.xml'):
+                            cloud_pct = self._get_cloud_coverage(obj['Key'])
+                            if cloud_pct <= cloud_cover:
+                                products.append(obj['Key'].rsplit('/', 1)[0])
+            except Exception as e:
+                logging.error(f"Error listing objects: {str(e)}")
+        return products
+
+    def _get_cloud_coverage(self, metadata_key):
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=metadata_key)
+            metadata_content = response['Body'].read().decode('utf-8')
+            if 'cloudcoverpercentage' in metadata_content.lower():
+                return float(metadata_content.split('cloudcoverpercentage')[1].split('<')[0])
+            return 100
+        except Exception as e:
+            logging.error(f"Error reading metadata: {str(e)}")
+            return 100
+
+    def download_product(self, product_path, output_folder):
+        try:
+            bands = ['B02', 'B03', 'B04', 'B08']  # RGB + NIR bands
+            for band in bands:
+                key = f"{product_path}/R10m/{band}.jp2"
+                output_path = os.path.join(output_folder, f"{os.path.basename(product_path)}_{band}.jp2")
+                logging.info(f"Downloading {key}")
+                self.s3.download_file(self.bucket, key, output_path)
+                logging.info(f"Successfully downloaded: {output_path}")
+            return True
+        except Exception as e:
+            logging.error(f"Error downloading product: {str(e)}")
+            return False
+
+def download_images(config):
+    download_config = config['download']['aws']
+    data_config = config['data']
+    
+    output_folder = os.path.join(
+        config['processing']['output_folder'],
+        config['satellite']['copernicus']['platform'],
+        config['satellite']['copernicus']['product_level']
+    )
+    os.makedirs(output_folder, exist_ok=True)
+
+    downloader = AWSS2Downloader(
+        region=download_config['region'],
+        bucket=download_config['bucket']
+    )
+
+    products = downloader.search_products(
+        tile_name=download_config['tile_name'],
+        start_date=data_config['dates']['start'],
+        end_date=data_config['dates']['end'],
+        cloud_cover=download_config['cloud_cover_threshold']
+    )
+
+    if products:
+        logging.info(f"Found {len(products)} products")
+        for product_path in products:
+            if downloader.download_product(product_path, output_folder):
+                logging.info(f"Successfully downloaded product: {product_path}")
+            else:
+                logging.error(f"Failed to download product: {product_path}")
+    else:
+        logging.error("No products found matching the criteria")
+
+if __name__ == "__main__":
+    config_path = "config/config.yaml"
+    with open(config_path, 'r') as file:
+        config = yaml.safe_load(file)
+
+    log_file = config['logging']['log_file']
+    log_level = config['logging']['log_level']
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    
+    logging.basicConfig(
+        filename=log_file,
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    download_images(config)
+```
+
+4. Running the Script
+-------------------
+1. Make sure all dependencies are installed
+2. Create the necessary folders:
+   ```
+   mkdir -p data/processed/Sentinel-2/L2A
+   mkdir -p data/intermediate
+   mkdir -p results/logs
+   ```
+3. Run the script:
+   ```
+   python src/main/download.py
+   ```
+
+5. Troubleshooting
+----------------
+- If you see "Unable to locate credentials" errors, the script is correctly using anonymous access
+- Check the log file at results/logs/pipeline.log for detailed error messages
+- Ensure your internet connection is stable
+- The script downloads only 10m resolution bands (RGB + NIR) to save space
+
+6. Output Structure
+-----------------
+Downloaded images will be saved in:
+data/processed/Sentinel-2/L2A/{product_id}_{band}.jp2
+
+Bands downloaded:
+- B02: Blue
+- B03: Green
+- B04: Red
+- B08: Near Infrared (NIR)

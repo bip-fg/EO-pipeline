@@ -1,0 +1,55 @@
+# config/config.yaml
+
+auth:
+  # OAuth2 client credentials (replace con i tuoi valori)
+  client_id: "sh-04865b68-7259-414b-af52-515315b71f17"
+  client_secret: "ZzyTHZZTbmvIx06VRoHoEs8EIQQp9WEg"
+  token_url: "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+  grant_type: "client_credentials"
+
+data:
+  dates:
+    start: "2025-04-01"      # Start date (YYYY-MM-DD)
+    end:   "2025-04-08"      # End date (YYYY-MM-DD)
+
+# Choose one of the two geometry definitions below:
+  geometry:
+    # 1) Polygon example
+    # type: "Polygon"
+    # coordinates:
+    #   - 
+    #     - [12.45, 41.85]
+    #     - [12.45, 42.05]
+    #     - [12.65, 42.05]
+    #     - [12.65, 41.85]
+    #     - [12.45, 41.85]
+
+    # 2) Point example
+    type: "Point"
+    coordinates: [12.50, 41.90]  # [longitude, latitude]
+
+download:
+  provider: "copernicus_mosaic"
+  copernicus_mosaic:
+    url: "https://sh.dataspace.copernicus.eu/api/v1/mosaic/search"
+    # Ora utilizziamo il token ottenuto via OAuth2 anziché api_key
+    use_bearer_token: true
+    collection: "sentinel-2-l2a"
+    pixel_size: 10          # in metri
+    band_preset: "TRUE_COLOR"  # o "FALSE_COLOR" per NIR
+    time_series: false
+    max_cloud_cover: 20
+
+processing:
+  output_folder:       "data/processed"
+  intermediate_folder: "data/intermediate"
+  algorithm:           "ndvi"
+  bands: ["B02", "B03", "B04", "B08"]
+
+preprocessing:
+  bands: ['B02', 'B03', 'B04', 'B08']
+  output_format: 'pickle'
+
+logging:
+  log_file:  "results/logs/pipeline.log"
+  log_level: "INFO"
