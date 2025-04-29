@@ -35,13 +35,19 @@ EO Pipeline/
 │   └── logs/              # Pipeline logs
 └── requirements.txt       # Python dependencies
 
-project-root/
-│
+processing-root-folder/
 ├── data/
-│   ├── raw/             # Raw downloaded data
-│   ├── processed/       # Final outputs
-│   ├── intermediate/    # Optional intermediate steps
-│   └── external/        # External datasets (shapefiles, DEM, etc.)
+│   ├── raw/
+│   │   └── Sentinel-2/*.SAFE
+│   ├── preprocessed/
+│   │   └── Sentinel-2/L2A/*_bands.tif
+│   ├── processed/
+│   │   └── Sentinel-2/L2A/*_ndvi.tif
+│   └── analysis/
+│       └── Sentinel-2/L2A/*_classified.tif
+├── results/
+│   └── logs/
+│       └── pipeline.log
 │
 ├── src/
 │   ├── main/            # Core processing scripts

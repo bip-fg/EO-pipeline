@@ -15,7 +15,7 @@ from shapely.geometry import box, shape
 from rasterio.mask import mask
 import geopandas as gpd
 import json
-from osgeo import gdal, ogr, osr
+from osgeo import gdal, ogr, osr  # Changed from direct import to osgeo package
 
 # Add project root to Python path
 current_file = Path(__file__).resolve()
@@ -47,6 +47,23 @@ def setup_logging() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=handlers
     )
+
+def calculate_ndvi(red: np.ndarray, nir: np.ndarray) -> np.ndarray:
+    """
+    Calculate NDVI from BOA reflectance values
+    """
+    # Scale DN to reflectance
+    red_ref = red.astype('float32') / 10000.0
+    nir_ref = nir.astype('float32') / 10000.0
+    
+    # Calculate NDVI
+    ndvi = np.where(
+        (nir_ref + red_ref) > 0,
+        (nir_ref - red_ref) / (nir_ref + red_ref),
+        0
+    )
+    
+    return np.clip(ndvi, -1, 1)
 
 class PreprocessingPipeline:
     def __init__(self, root_dir: Path):
